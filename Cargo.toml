@@ -9,7 +9,10 @@ arrow-array = "58.0.0"
 arrow-json = "58.0.0"
 arrow-schema = "58.0.0"
 clap = { version = "4.5.60", features = ["derive"] }
+datafusion = "52.1.0"
+futures = "0.3.32"
 indicatif = "0.18.4"
 parquet = { version = "58.0.0", features = ["zstd"] }
 shakmaty = "0.27.3"
+tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread"] }
 zstd = "0.13.3"
