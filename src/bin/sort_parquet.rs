@@ -9,6 +9,7 @@ use std::sync::{
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use datafusion::arrow::datatypes::Schema;
+use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::parquet::arrow::ArrowWriter;
 use datafusion::parquet::basic::{Compression, ZstdLevel};
 use datafusion::parquet::file::properties::WriterProperties;
@@ -16,12 +17,15 @@ use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext, col
 use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 
-const DEFAULT_INPUT_DIR: &str = "../lichess_eval_parquet_zobr";
-const DEFAULT_OUTPUT_DIR: &str = "../lichess_eval_parquet_zobr_sorted";
+const DEFAULT_INPUT_DIR: &str = "lichess_eval_parquet_zobr";
+const DEFAULT_OUTPUT_DIR: &str = "lichess_eval_parquet_zobr_sorted";
 const DEFAULT_SORT_COLUMN: &str = "zobr64";
 const DEFAULT_TARGET_FILE_MB: u64 = 100;
-const DEFAULT_BATCH_ROWS: usize = 200_000;
+const DEFAULT_BATCH_ROWS: usize = 20_000;
 const DEFAULT_ZSTD_LEVEL: i32 = 3;
+const DEFAULT_MEMORY_LIMIT_MB: usize = 2_048;
+const DEFAULT_SORT_SPILL_RESERVATION_MB: usize = 32;
+const DEFAULT_SORT_IN_PLACE_THRESHOLD_KB: usize = 256;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -49,6 +53,14 @@ struct Args {
     /// DataFusion execution batch size
     #[arg(long, default_value_t = DEFAULT_BATCH_ROWS)]
     batch_rows: usize,
+
+    /// Maximum DataFusion execution memory before spilling (MB)
+    #[arg(long, default_value_t = DEFAULT_MEMORY_LIMIT_MB)]
+    memory_limit_mb: usize,
+
+    /// DataFusion spill directory (defaults to output_dir/.datafusion_spill)
+    #[arg(long, default_value = "")]
+    spill_dir: String,
 
     /// Parquet zstd compression level for output
     #[arg(long, default_value_t = DEFAULT_ZSTD_LEVEL)]
@@ -117,6 +129,9 @@ async fn main() -> Result<()> {
     if args.target_file_mb == 0 {
         bail!("--target-file-mb must be > 0");
     }
+    if args.memory_limit_mb == 0 {
+        bail!("--memory-limit-mb must be > 0");
+    }
 
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let input_dir = resolve_user_path(&cwd, &args.input_dir);
@@ -156,10 +171,35 @@ async fn main() -> Result<()> {
     println!("Sort column: {}", args.sort_column);
     println!("Target file size: {} MB", args.target_file_mb);
     println!("Batch rows: {}", args.batch_rows);
+    println!("DataFusion memory limit: {} MB", args.memory_limit_mb);
     println!("Parquet zstd level: {}", args.parquet_zstd_level);
 
-    let session_config = SessionConfig::new().with_batch_size(args.batch_rows);
-    let ctx = SessionContext::new_with_config(session_config);
+    let spill_dir = if args.spill_dir.trim().is_empty() {
+        output_dir.join(".datafusion_spill")
+    } else {
+        resolve_user_path(&cwd, &args.spill_dir)
+    };
+    fs::create_dir_all(&spill_dir)
+        .with_context(|| format!("failed to create spill directory {}", spill_dir.display()))?;
+    println!("DataFusion spill dir: {}", spill_dir.display());
+
+    let session_config = SessionConfig::new()
+        .with_batch_size(args.batch_rows)
+        .set_str("datafusion.execution.spill_compression", "zstd")
+        .set_usize(
+            "datafusion.execution.sort_spill_reservation_bytes",
+            DEFAULT_SORT_SPILL_RESERVATION_MB * 1024 * 1024,
+        )
+        .set_usize(
+            "datafusion.execution.sort_in_place_threshold_bytes",
+            DEFAULT_SORT_IN_PLACE_THRESHOLD_KB * 1024,
+        );
+    let runtime = RuntimeEnvBuilder::new()
+        .with_temp_file_path(&spill_dir)
+        .with_memory_limit(args.memory_limit_mb * 1024 * 1024, 1.0)
+        .build_arc()
+        .context("failed to initialize DataFusion runtime")?;
+    let ctx = SessionContext::new_with_config_rt(session_config, runtime);
     let input_glob = input_dir.join("*.parquet").to_string_lossy().to_string();
 
     let total_rows = count_rows(&ctx, &input_glob)
