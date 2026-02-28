@@ -43,6 +43,30 @@ cargo run --release -- --input-dir /lichess_db_eval --output-dir /lichess_eval_p
 cargo run --release -- --input-file /lichess_db_eval/lichess_db_eval.jsonl.zst
 ```
 
+## Add zobrist hashes to parquet
+
+This executable reads parquet files from `/lichess_eval_parquet`, computes hashes from `fen`, and writes output parquet files with two new columns:
+- `zobr64` (`UInt64`)
+- `zobr128` (`FixedSizeBinary(16)`)
+
+Run with defaults:
+
+```bash
+cargo run --release --bin add_zobrist --
+```
+
+Defaults:
+- input dir: `/lichess_eval_parquet`
+- output dir: `/lichess_eval_parquet_zobr`
+- batch rows: `50000`
+- parquet compression: `zstd level 3`
+
+Run with explicit arguments:
+
+```bash
+cargo run --release --bin add_zobrist -- --input-dir /lichess_eval_parquet --output-dir /lichess_eval_parquet_zobr --batch-rows 50000 --parquet-zstd-level 3
+```
+
 ## Performance and memory notes
 
 - This tool is designed for large inputs (for example 20 GB `.zst`) with streaming I/O.

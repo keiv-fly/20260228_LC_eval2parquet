@@ -1,3 +1,4 @@
 /target
 /lichess_db_eval
 /lichess_eval_parquet
+/lichess_eval_parquet_zobr
