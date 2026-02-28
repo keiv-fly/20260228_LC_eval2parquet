@@ -84,17 +84,18 @@ cargo run --release --bin sort_parquet --
 Run with explicit arguments:
 
 ```bash
-cargo run --release --bin sort_parquet -- --input-dir ../lichess_eval_parquet_zobr --output-dir ../lichess_eval_parquet_zobr_sorted --sort-column zobr64 --target-file-mb 100 --batch-rows 200000 --parquet-zstd-level 3 --overwrite
+cargo run --release --bin sort_parquet -- --input-dir lichess_eval_parquet_zobr --output-dir lichess_eval_parquet_zobr_sorted --sort-column zobr64 --target-file-mb 100 --batch-rows 5000 --memory-limit-mb 2048 --parquet-zstd-level 3 --overwrite
 ```
 
 ## Performance and memory notes
 
 - This tool is designed for large inputs (for example 20 GB `.zst`) with streaming I/O.
-- Memory usage is primarily controlled by `--batch-rows`.
-- If you need lower RAM usage, reduce batch size, for example:
+- Memory usage is primarily controlled by `--batch-rows` and `--memory-limit-mb`.
+- The sorter defaults are conservative for large global sorts (`batch_rows=5000`, `target_partitions=2`, low spill reservation).
+- If you still hit memory pressure, reduce batch size and/or memory limit further, for example:
 
 ```bash
-cargo run --release -- --batch-rows 10000
+cargo run --release --bin sort_parquet -- --batch-rows 2000 --memory-limit-mb 1024
 ```
 
 ## Check CLI help

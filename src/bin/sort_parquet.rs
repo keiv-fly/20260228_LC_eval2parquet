@@ -21,11 +21,12 @@ const DEFAULT_INPUT_DIR: &str = "lichess_eval_parquet_zobr";
 const DEFAULT_OUTPUT_DIR: &str = "lichess_eval_parquet_zobr_sorted";
 const DEFAULT_SORT_COLUMN: &str = "zobr64";
 const DEFAULT_TARGET_FILE_MB: u64 = 100;
-const DEFAULT_BATCH_ROWS: usize = 20_000;
+const DEFAULT_BATCH_ROWS: usize = 5_000;
 const DEFAULT_ZSTD_LEVEL: i32 = 3;
 const DEFAULT_MEMORY_LIMIT_MB: usize = 2_048;
-const DEFAULT_SORT_SPILL_RESERVATION_MB: usize = 32;
-const DEFAULT_SORT_IN_PLACE_THRESHOLD_KB: usize = 256;
+const DEFAULT_TARGET_PARTITIONS: usize = 2;
+const DEFAULT_SORT_SPILL_RESERVATION_MB: usize = 4;
+const DEFAULT_SORT_IN_PLACE_THRESHOLD_KB: usize = 64;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -172,6 +173,14 @@ async fn main() -> Result<()> {
     println!("Target file size: {} MB", args.target_file_mb);
     println!("Batch rows: {}", args.batch_rows);
     println!("DataFusion memory limit: {} MB", args.memory_limit_mb);
+    println!(
+        "DataFusion target partitions: {}",
+        DEFAULT_TARGET_PARTITIONS
+    );
+    println!(
+        "DataFusion sort spill reservation: {} MB",
+        DEFAULT_SORT_SPILL_RESERVATION_MB
+    );
     println!("Parquet zstd level: {}", args.parquet_zstd_level);
 
     let spill_dir = if args.spill_dir.trim().is_empty() {
@@ -185,6 +194,7 @@ async fn main() -> Result<()> {
 
     let session_config = SessionConfig::new()
         .with_batch_size(args.batch_rows)
+        .with_target_partitions(DEFAULT_TARGET_PARTITIONS)
         .set_str("datafusion.execution.spill_compression", "zstd")
         .set_usize(
             "datafusion.execution.sort_spill_reservation_bytes",
@@ -193,7 +203,8 @@ async fn main() -> Result<()> {
         .set_usize(
             "datafusion.execution.sort_in_place_threshold_bytes",
             DEFAULT_SORT_IN_PLACE_THRESHOLD_KB * 1024,
-        );
+        )
+        .set_bool("datafusion.optimizer.repartition_sorts", false);
     let runtime = RuntimeEnvBuilder::new()
         .with_temp_file_path(&spill_dir)
         .with_memory_limit(args.memory_limit_mb * 1024 * 1024, 1.0)
