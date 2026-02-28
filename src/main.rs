@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io::{BufReader, Write};
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -10,6 +10,7 @@ use anyhow::{Context, Result, bail};
 use arrow_json::ReaderBuilder;
 use arrow_schema::{DataType, Field, Fields, Schema};
 use clap::Parser;
+use indicatif::{ProgressBar, ProgressStyle};
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
@@ -80,6 +81,25 @@ impl Write for CountingWriter {
     }
 }
 
+struct CountingReader<R> {
+    inner: R,
+    bytes_read: Arc<AtomicU64>,
+}
+
+impl<R> CountingReader<R> {
+    fn new(inner: R, bytes_read: Arc<AtomicU64>) -> Self {
+        Self { inner, bytes_read }
+    }
+}
+
+impl<R: Read> Read for CountingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buf)?;
+        self.bytes_read.fetch_add(read as u64, Ordering::Relaxed);
+        Ok(read)
+    }
+}
+
 struct ActiveWriter {
     part_index: usize,
     path: PathBuf,
@@ -131,8 +151,15 @@ fn main() -> Result<()> {
 
     let source = File::open(&input_file)
         .with_context(|| format!("failed to open input file {}", input_file.display()))?;
-    let decoder = Decoder::new(source).context("failed to initialize zstd decoder")?;
+    let total_input_bytes = source
+        .metadata()
+        .with_context(|| format!("failed to read metadata for {}", input_file.display()))?
+        .len();
+    let compressed_bytes_read = Arc::new(AtomicU64::new(0));
+    let counting_source = CountingReader::new(source, compressed_bytes_read.clone());
+    let decoder = Decoder::new(counting_source).context("failed to initialize zstd decoder")?;
     let buffered = BufReader::with_capacity(16 * 1024 * 1024, decoder);
+    let progress = build_progress_bar(total_input_bytes);
 
     let mut json_reader = ReaderBuilder::new(schema.clone())
         .with_batch_size(args.batch_rows)
@@ -167,18 +194,17 @@ fn main() -> Result<()> {
             .context("failed to write record batch to parquet")?;
         writer.rows_written += batch.num_rows() as u64;
         total_rows += batch.num_rows() as u64;
+        progress.set_position(
+            compressed_bytes_read
+                .load(Ordering::Relaxed)
+                .min(total_input_bytes),
+        );
 
         if writer.approx_size_bytes() >= target_bytes {
             let next_part_index = writer.part_index + 1;
-            let (path, size_bytes, rows) = writer.close()?;
+            let (_path, size_bytes, _rows) = writer.close()?;
             total_files += 1;
             total_bytes += size_bytes;
-            println!(
-                "Wrote {} (rows: {}, size: {:.2} MB)",
-                path.display(),
-                rows,
-                size_bytes as f64 / (1024.0 * 1024.0)
-            );
 
             part_index = next_part_index;
             writer = open_parquet_writer(
@@ -192,15 +218,9 @@ fn main() -> Result<()> {
     }
 
     if writer.rows_written > 0 {
-        let (path, size_bytes, rows) = writer.close()?;
+        let (_path, size_bytes, _rows) = writer.close()?;
         total_files += 1;
         total_bytes += size_bytes;
-        println!(
-            "Wrote {} (rows: {}, size: {:.2} MB)",
-            path.display(),
-            rows,
-            size_bytes as f64 / (1024.0 * 1024.0)
-        );
     } else {
         // If the input was empty, don't keep an empty parquet file.
         fs::remove_file(&writer.path).with_context(|| {
@@ -210,6 +230,8 @@ fn main() -> Result<()> {
             )
         })?;
     }
+    progress.set_position(total_input_bytes);
+    progress.finish_with_message("Conversion complete");
 
     println!(
         "Done. Total files: {}, total rows: {}, total parquet size: {:.2} GB",
@@ -349,4 +371,16 @@ fn build_schema() -> Schema {
             false,
         ),
     ]))
+}
+
+fn build_progress_bar(total_input_bytes: u64) -> ProgressBar {
+    let progress = ProgressBar::new(total_input_bytes);
+    progress.set_style(
+        ProgressStyle::with_template(
+            "{wide_bar} {percent:>3}% {bytes}/{total_bytes} | elapsed: {elapsed_precise} | eta: {eta_precise}",
+        )
+        .expect("invalid progress bar template")
+        .progress_chars("=> "),
+    );
+    progress
 }
