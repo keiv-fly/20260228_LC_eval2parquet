@@ -67,6 +67,26 @@ Run with explicit arguments:
 cargo run --release --bin add_zobrist -- --input-dir /lichess_eval_parquet --output-dir /lichess_eval_parquet_zobr --batch-rows 50000 --parquet-zstd-level 3
 ```
 
+## Sort parquet by zobr64 using DataFusion
+
+This executable reads parquet files from `../lichess_eval_parquet_zobr`, globally sorts rows by `zobr64` using DataFusion, and writes `part-*.parquet` files to `../lichess_eval_parquet_zobr_sorted`.
+
+- Output parts are rotated at approximately `100 MB` each (`--target-file-mb`).
+- Progress bar is row-based and includes elapsed time + ETA.
+- Total row count is precalculated before writing so progress has a fixed total.
+
+Run with defaults:
+
+```bash
+cargo run --release --bin sort_parquet --
+```
+
+Run with explicit arguments:
+
+```bash
+cargo run --release --bin sort_parquet -- --input-dir ../lichess_eval_parquet_zobr --output-dir ../lichess_eval_parquet_zobr_sorted --sort-column zobr64 --target-file-mb 100 --batch-rows 200000 --parquet-zstd-level 3 --overwrite
+```
+
 ## Performance and memory notes
 
 - This tool is designed for large inputs (for example 20 GB `.zst`) with streaming I/O.

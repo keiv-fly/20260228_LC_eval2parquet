@@ -8,12 +8,11 @@ use std::sync::{
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use datafusion::arrow::array::{Int64Array, UInt64Array};
 use datafusion::arrow::datatypes::Schema;
 use datafusion::parquet::arrow::ArrowWriter;
 use datafusion::parquet::basic::{Compression, ZstdLevel};
 use datafusion::parquet::file::properties::WriterProperties;
-use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext, col, count, lit};
+use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext, col};
 use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 
@@ -135,8 +134,9 @@ async fn main() -> Result<()> {
 
     let parquet_files = list_parquet_files(&input_dir)?;
     if output_dir.exists() && args.overwrite {
-        fs::remove_dir_all(&output_dir)
-            .with_context(|| format!("failed to remove output directory {}", output_dir.display()))?;
+        fs::remove_dir_all(&output_dir).with_context(|| {
+            format!("failed to remove output directory {}", output_dir.display())
+        })?;
     }
     fs::create_dir_all(&output_dir)
         .with_context(|| format!("failed to create output directory {}", output_dir.display()))?;
@@ -246,34 +246,13 @@ async fn main() -> Result<()> {
 }
 
 async fn count_rows(ctx: &SessionContext, input_glob: &str) -> Result<u64> {
-    let count_df = ctx
+    let row_count = ctx
         .read_parquet(input_glob, ParquetReadOptions::default())
         .await?
-        .aggregate(vec![], vec![count(lit(1_i64)).alias("row_count")])?;
-    let count_batches = count_df.collect().await?;
-    let batch = count_batches.first().context("count query returned no batches")?;
-    if batch.num_rows() == 0 {
-        bail!("count query returned zero rows");
-    }
-    let column = batch.column(0);
-
-    if let Some(array) = column.as_any().downcast_ref::<UInt64Array>() {
-        if array.is_null(0) {
-            bail!("count query returned NULL");
-        }
-        return Ok(array.value(0));
-    }
-    if let Some(array) = column.as_any().downcast_ref::<Int64Array>() {
-        if array.is_null(0) {
-            bail!("count query returned NULL");
-        }
-        return u64::try_from(array.value(0)).context("count query returned a negative value");
-    }
-
-    bail!(
-        "unexpected count column type: {}",
-        batch.schema().field(0).data_type()
-    )
+        .count()
+        .await
+        .context("count query failed")?;
+    u64::try_from(row_count).context("row count does not fit in u64")
 }
 
 fn open_parquet_writer(
@@ -299,8 +278,8 @@ fn open_parquet_writer(
         .set_created_by("lc_eval2parquet sort_parquet".to_string())
         .build();
 
-    let writer =
-        ArrowWriter::try_new(counting, schema, Some(props)).context("failed to create parquet writer")?;
+    let writer = ArrowWriter::try_new(counting, schema, Some(props))
+        .context("failed to create parquet writer")?;
 
     Ok(ActiveWriter {
         path: output_path,

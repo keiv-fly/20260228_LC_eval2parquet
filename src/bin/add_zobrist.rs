@@ -8,12 +8,12 @@ use arrow_array::{ArrayRef, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 use shakmaty::fen::Fen;
-use shakmaty::zobrist::{Zobrist128, Zobrist64, ZobristHash};
+use shakmaty::zobrist::{Zobrist64, Zobrist128, ZobristHash};
 use shakmaty::{CastlingMode, Chess, EnPassantMode, PositionError};
 
 const DEFAULT_INPUT_DIR: &str = "/lichess_eval_parquet";
@@ -79,8 +79,13 @@ fn main() -> Result<()> {
             .context("invalid UTF-8 filename in input parquet path")?;
         let output_path = output_dir.join(file_name);
 
-        let rows = process_file(input_path, &output_path, args.batch_rows, args.parquet_zstd_level)
-            .with_context(|| format!("failed processing {}", input_path.display()))?;
+        let rows = process_file(
+            input_path,
+            &output_path,
+            args.batch_rows,
+            args.parquet_zstd_level,
+        )
+        .with_context(|| format!("failed processing {}", input_path.display()))?;
 
         total_rows += rows;
         progress.inc(1);
@@ -96,11 +101,20 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn process_file(input_path: &Path, output_path: &Path, batch_rows: usize, zstd_level: i32) -> Result<u64> {
+fn process_file(
+    input_path: &Path,
+    output_path: &Path,
+    batch_rows: usize,
+    zstd_level: i32,
+) -> Result<u64> {
     let source = File::open(input_path)
         .with_context(|| format!("failed to open input file {}", input_path.display()))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(source)
-        .with_context(|| format!("failed to open parquet metadata for {}", input_path.display()))?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(source).with_context(|| {
+        format!(
+            "failed to open parquet metadata for {}",
+            input_path.display()
+        )
+    })?;
     let input_schema = builder.schema().clone();
     let output_schema = Arc::new(extended_schema(input_schema.as_ref()));
     let mut reader = builder
@@ -127,15 +141,21 @@ fn process_file(input_path: &Path, output_path: &Path, batch_rows: usize, zstd_l
     let mut rows_written: u64 = 0;
     for batch in &mut reader {
         let batch = batch.context("failed to read record batch")?;
-        let augmented = append_zobrist_columns(&batch)
-            .with_context(|| format!("failed generating zobrist columns for {}", input_path.display()))?;
+        let augmented = append_zobrist_columns(&batch).with_context(|| {
+            format!(
+                "failed generating zobrist columns for {}",
+                input_path.display()
+            )
+        })?;
         rows_written += augmented.num_rows() as u64;
         writer
             .write(&augmented)
             .context("failed to write record batch")?;
     }
 
-    writer.close().context("failed to finalize parquet output")?;
+    writer
+        .close()
+        .context("failed to finalize parquet output")?;
     Ok(rows_written)
 }
 
