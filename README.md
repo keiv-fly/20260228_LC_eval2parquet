@@ -87,6 +87,33 @@ Run with explicit arguments:
 cargo run --release --bin sort_parquet -- --input-dir lichess_eval_parquet_zobr --output-dir lichess_eval_parquet_zobr_sorted --sort-column zobr64 --target-file-mb 100 --batch-rows 5000 --memory-limit-mb 2048 --parquet-zstd-level 3 --overwrite
 ```
 
+## Convert eval jsonl.zst to RocksDB
+
+This executable reads `*.jsonl.zst` from `/lichess_db_eval`, computes `zobr64` from `fen`, and writes a RocksDB to `/lichess_eval_rocksdb`.
+
+- key: `zobr64` (8 bytes, big-endian `u64`)
+- value: JSON containing `eval`, `mate`, `depth`, `fen`
+- per input line: picks the eval entry with the biggest `depth`
+- per `zobr64`: keeps only the entry with the biggest `depth`
+
+Run with defaults:
+
+```bash
+cargo run --release --bin eval_jsonl_to_rocksdb --
+```
+
+Run with explicit arguments:
+
+```bash
+cargo run --release --bin eval_jsonl_to_rocksdb -- --input-dir /lichess_db_eval --output-dir /lichess_eval_rocksdb --progress-every 1000000 --overwrite
+```
+
+Use a specific input file:
+
+```bash
+cargo run --release --bin eval_jsonl_to_rocksdb -- --input-file /lichess_db_eval/lichess_db_eval.jsonl.zst --output-dir /lichess_eval_rocksdb --overwrite
+```
+
 ## Performance and memory notes
 
 - This tool is designed for large inputs (for example 20 GB `.zst`) with streaming I/O.
