@@ -1,0 +1,48 @@
+zobr64: 1469630302202025903 (rows=2, unique_fens=2)
+rnbq1bnr/ppp1pppp/8/1k6/2PpP3/8/PP1P1PPP/RNBQKBNR b KQ -
+rnbq1bnr/ppp1pppp/8/1k6/2PpP3/8/PP1P1PPP/RNBQKBNR b KQ e3
+
+zobr64: 4889619998807747278 (rows=2, unique_fens=2)
+k7/8/8/2npP3/4K3/8/8/8 w - -
+k7/8/8/2npP3/4K3/8/8/8 w - d6
+
+zobr64: 5060803636482931868 (rows=18, unique_fens=18)
+1K2Q3/1B1qR2p/rPR1B1PR/P2p2pr/5R2/Nrp1P3/3b4/N3k3 w - -
+1N1R4/2KPP1p1/pB2n3/2p4n/2Bppn2/k2p1n2/3q1R2/b2Q4 w - -
+1NR3nb/6B1/2pq2p1/2R4B/2Q5/2N5/1Kb3r1/2n3k1 w - -
+1k2n3/n5qq/p7/1rR3Br/KNB2P2/bp2r2Q/1q1Qp3/2n5 w - -
+2N2Q2/b7/q2rkn1N/8/1QR1K3/1B2np2/8/7r w - -
+4K2B/2N5/1P3b2/qn2RnBn/7b/Rn2p3/Nn4Q1/k7 w - -
+5QBQ/R7/N2n4/P4K2/2pq1R2/P1kb2B1/4b2n/3r4 w - -
+5RQ1/N1pq2bN/K5k1/1n4B1/BqN4Q/r2nBRq1/Rp2qnQ1/1n6 w - -
+6r1/b1p1kB2/Np6/np3K2/RNrR4/3q2NP/4P1nN/1rN1q3 w - -
+7B/Q1pq1Rb1/P2R2P1/1p1P4/2p3p1/RQ2K2k/qrQ4n/2n1b1B1 w - -
+7N/b2nB1nk/2pK4/1BQP1p2/3r1r2/R1RN2p1/1bb5/8 b - -
+8/1b2K3/q3NP2/1BQ1r1NB/3q4/NRNn3p/1q2npPk/3B4 w - -
+8/3B1q2/3K1k2/1Pn2P2/5nR1/1q2Qq2/2NRr2B/q3R3 w - -
+q2N4/3ppRKn/p2p1n2/2bP4/7r/np1pb2P/Nr2BP1k/2b1N3 w - -
+q2k1q1r/5R2/p1bp1n2/R1p2P2/7r/np2br2/5Pn1/1B2N1K1 w - -
+r1n1r3/r5n1/3q2P1/k2qP1p1/3P3P/2NK1b1n/1p1Q2Q1/2Bqb2N w - -
+rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -
+rr1qBRb1/4qqN1/2p3Bp/Pn2RQR1/3Bp2K/k4Nn1/pnQq1Qp1/4B3 w - -
+
+zobr64: 9384546495678726550 (rows=3, unique_fens=3)
+3Nn2R/BK1Q4/R5QQ/R1B2b2/r1k1P2p/1bqR4/1bB4P/2Nq1bb1 b - -
+4b1QQ/rq1RQ1b1/p4r2/Q2B1pkp/1pNrP1rb/R7/2B5/K1n4Q b - -
+rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -
+
+zobr64: 13185648422126966659 (rows=2, unique_fens=2)
+1q6/N2KQ2Q/1B1NQ1r1/2Bq2n1/5Nb1/3P2R1/1B1kbQ2/1r1B4 b - -
+8/k5B1/2Q1Qp1p/3PQ1NK/N1PRrr2/p1pn2R1/Nq2Pp2/6r1 b - -
+
+zobr64: 13512721484911620885 (rows=2, unique_fens=2)
+4K2B/2N5/1P3b2/qn2RnBn/7b/Rn2p1Q1/Nn6/k7 b - -
+4q3/1K1Q1b2/3p3Q/R4B2/2k4p/2NR1QQq/1bB4N/1b1q1b2 b - -
+
+zobr64: 13757846718353144213 (rows=2, unique_fens=2)
+7N/b2nB1nk/2pK4/1BQP1p2/3r1r2/R1RN2p1/1bb5/8 w - -
+rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq -
+
+zobr64: 17487811229332759529 (rows=2, unique_fens=2)
+1k2n3/n5qq/p7/1rR3Br/KNBQ1P2/bp2r2Q/1q2p3/2n5 b - -
+1k5n/1p4rP/B4pn1/BR4p1/1pQQN1R1/4q1rb/n1N2BQ1/7K b - -

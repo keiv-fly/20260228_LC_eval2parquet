@@ -22,10 +22,8 @@ const DEFAULT_BATCH_ROWS: usize = 50_000;
 const DEFAULT_WRITE_BATCH_ROWS: usize = 50_000;
 const DEFAULT_SST_ROWS_PER_FILE: u64 = 2_000_000;
 
-const VALUE_VERSION: u8 = 1;
-const FLAG_HAS_EVAL: u8 = 1 << 0;
-const FLAG_HAS_MATE: u8 = 1 << 1;
-const FLAG_HAS_MOVE: u8 = 1 << 2;
+const BOARD34_SIZE: usize = 34;
+const ENTRY_SIZE: usize = 39;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum WritePath {
@@ -75,6 +73,11 @@ struct LoadStats {
     input_rows: u64,
     written_keys: u64,
     ingested_sst_files: u64,
+}
+
+struct PendingKey {
+    zobr64: u64,
+    entries: Vec<[u8; ENTRY_SIZE]>,
 }
 
 struct ActiveSstWriter<'a> {
@@ -241,7 +244,10 @@ fn main() -> Result<()> {
         )?,
     };
 
-    db.flush().context("failed to flush RocksDB")?;
+    db.flush().context("failed to flush RocksDB before compaction")?;
+    println!("Running full compact_range on default column family...");
+    db.compact_range::<&[u8], &[u8]>(None, None);
+    db.flush().context("failed to flush RocksDB after compaction")?;
     progress.finish_with_message("Conversion complete");
 
     println!(
@@ -270,38 +276,46 @@ fn load_with_sst_ingest(
         .with_context(|| format!("failed to create {}", sst_tmp_dir.display()))?;
 
     let mut sst_state = SstIngestState::new(db, db_opts, sst_tmp_dir.clone(), sst_rows_per_file);
-    let mut pending: Option<(u64, Vec<u8>)> = None;
+    let mut pending: Option<PendingKey> = None;
     let mut last_input_key: Option<u64> = None;
 
-    let input_rows = stream_rows(input_files, batch_rows, progress, |zobr64, encoded| {
+    let input_rows = stream_rows(input_files, batch_rows, progress, |zobr64, entry| {
         if let Some(last) = last_input_key
             && zobr64 < last
         {
             bail!(
-                "input is not sorted by zobr64 (saw {} after {}). Use --write-path batch instead.",
+                "input is not sorted by zobr64 (saw {} after {}).",
                 zobr64,
                 last
             );
         }
         last_input_key = Some(zobr64);
 
-        if let Some((pending_key, pending_value)) = pending.take() {
-            if zobr64 == pending_key {
-                // Keep only the last row for a duplicate key.
-                pending = Some((zobr64, encoded));
-            } else {
-                sst_state.write_pair(pending_key, &pending_value)?;
-                pending = Some((zobr64, encoded));
-            }
-        } else {
-            pending = Some((zobr64, encoded));
+        if let Some(active) = pending.as_mut()
+            && active.zobr64 == zobr64
+        {
+            active.entries.push(entry);
+            return Ok(());
         }
 
+        if let Some(finished) = pending.take() {
+            let value = encode_rocksdb_value(&finished.entries).with_context(|| {
+                format!("failed to encode value for zobr64 {}", finished.zobr64)
+            })?;
+            sst_state.write_pair(finished.zobr64, &value)?;
+        }
+
+        pending = Some(PendingKey {
+            zobr64,
+            entries: vec![entry],
+        });
         Ok(())
     })?;
 
-    if let Some((pending_key, pending_value)) = pending.take() {
-        sst_state.write_pair(pending_key, &pending_value)?;
+    if let Some(finished) = pending.take() {
+        let value = encode_rocksdb_value(&finished.entries)
+            .with_context(|| format!("failed to encode value for zobr64 {}", finished.zobr64))?;
+        sst_state.write_pair(finished.zobr64, &value)?;
     }
     sst_state.finish()?;
 
@@ -329,28 +343,67 @@ fn load_with_write_batch(
 
     let batch_capacity_bytes = write_batch_rows.saturating_mul(128);
     let mut batch = WriteBatch::with_capacity_bytes(batch_capacity_bytes);
-    let mut rows_in_batch = 0usize;
+    let mut keys_in_batch = 0usize;
     let mut written_keys = 0u64;
+    let mut pending: Option<PendingKey> = None;
+    let mut last_input_key: Option<u64> = None;
 
-    let input_rows = stream_rows(input_files, batch_rows, progress, |zobr64, encoded| {
-        let key = zobr64.to_be_bytes();
-        batch.put(key, &encoded);
-        rows_in_batch += 1;
-        written_keys += 1;
+    let input_rows = stream_rows(input_files, batch_rows, progress, |zobr64, entry| {
+        if let Some(last) = last_input_key
+            && zobr64 < last
+        {
+            bail!(
+                "input is not sorted by zobr64 (saw {} after {}).",
+                zobr64,
+                last
+            );
+        }
+        last_input_key = Some(zobr64);
 
-        if rows_in_batch >= write_batch_rows {
+        if let Some(active) = pending.as_mut()
+            && active.zobr64 == zobr64
+        {
+            active.entries.push(entry);
+            return Ok(());
+        }
+
+        if let Some(finished) = pending.take() {
+            let value = encode_rocksdb_value(&finished.entries).with_context(|| {
+                format!("failed to encode value for zobr64 {}", finished.zobr64)
+            })?;
+            let key = finished.zobr64.to_be_bytes();
+            batch.put(key, &value);
+            keys_in_batch += 1;
+            written_keys += 1;
+        }
+
+        pending = Some(PendingKey {
+            zobr64,
+            entries: vec![entry],
+        });
+
+        if keys_in_batch >= write_batch_rows {
             let full_batch = std::mem::replace(
                 &mut batch,
                 WriteBatch::with_capacity_bytes(batch_capacity_bytes),
             );
             db.write_opt(full_batch, &write_opts)
                 .context("failed to write RocksDB WriteBatch")?;
-            rows_in_batch = 0;
+            keys_in_batch = 0;
         }
         Ok(())
     })?;
 
-    if rows_in_batch > 0 {
+    if let Some(finished) = pending.take() {
+        let value = encode_rocksdb_value(&finished.entries)
+            .with_context(|| format!("failed to encode value for zobr64 {}", finished.zobr64))?;
+        let key = finished.zobr64.to_be_bytes();
+        batch.put(key, &value);
+        keys_in_batch += 1;
+        written_keys += 1;
+    }
+
+    if keys_in_batch > 0 {
         db.write_opt(batch, &write_opts)
             .context("failed to write final RocksDB WriteBatch")?;
     }
@@ -369,7 +422,7 @@ fn stream_rows<F>(
     mut on_row: F,
 ) -> Result<u64>
 where
-    F: FnMut(u64, Vec<u8>) -> Result<()>,
+    F: FnMut(u64, [u8; ENTRY_SIZE]) -> Result<()>,
 {
     let mut input_rows = 0u64;
 
@@ -394,7 +447,7 @@ where
 
 fn process_batch<F>(batch: &RecordBatch, input_rows: &mut u64, on_row: &mut F) -> Result<()>
 where
-    F: FnMut(u64, Vec<u8>) -> Result<()>,
+    F: FnMut(u64, [u8; ENTRY_SIZE]) -> Result<()>,
 {
     let schema = batch.schema();
     let zobr_idx = schema
@@ -444,61 +497,231 @@ where
             None
         };
 
-        let encoded = encode_value(eval, mate, depth, &fen, best_move.as_deref())?;
+        let encoded = encode_entry(eval, mate, depth, &fen, best_move.as_deref())
+            .with_context(|| format!("failed to encode row {}", row))?;
         on_row(zobr64, encoded)?;
     }
 
     Ok(())
 }
 
-fn encode_value(
+fn encode_rocksdb_value(entries: &[[u8; ENTRY_SIZE]]) -> Result<Vec<u8>> {
+    if entries.is_empty() {
+        bail!("cannot encode empty entry list");
+    }
+    if entries.len() > u8::MAX as usize {
+        bail!(
+            "too many entries for one zobr64 key: {} (max {})",
+            entries.len(),
+            u8::MAX
+        );
+    }
+
+    let mut out = Vec::with_capacity(1 + entries.len() * ENTRY_SIZE);
+    out.push(entries.len() as u8);
+    for entry in entries {
+        out.extend_from_slice(entry);
+    }
+    Ok(out)
+}
+
+fn encode_entry(
     eval: Option<i32>,
     mate: Option<i32>,
     depth: i32,
     fen: &str,
     best_move: Option<&str>,
-) -> Result<Vec<u8>> {
-    let fen_bytes = fen.as_bytes();
-    let fen_len = u16::try_from(fen_bytes.len())
-        .with_context(|| format!("fen too long to encode: {} bytes", fen_bytes.len()))?;
+) -> Result<[u8; ENTRY_SIZE]> {
+    // The schema stores either centipawns (kind=0) or mate score (kind=1) in one i16.
+    let (raw_score, kind_bit) = if let Some(mate_score) = mate {
+        (mate_score, 1u16)
+    } else if let Some(eval_score) = eval {
+        (eval_score, 0u16)
+    } else {
+        bail!("row has neither eval nor mate");
+    };
+    let score = clamp_i16(raw_score);
+    let depth_u8 = clamp_depth_u8(depth);
+    let move_meta = pack_move_meta(best_move, kind_bit)?;
+    let board34 = fen_to_board34(fen)?;
 
-    let move_bytes = best_move.map(str::as_bytes);
-    if let Some(mv) = move_bytes
-        && mv.len() > u8::MAX as usize
-    {
-        bail!("move too long to encode: {} bytes", mv.len());
-    }
-
-    let mut flags = 0u8;
-    if eval.is_some() {
-        flags |= FLAG_HAS_EVAL;
-    }
-    if mate.is_some() {
-        flags |= FLAG_HAS_MATE;
-    }
-    if move_bytes.is_some() {
-        flags |= FLAG_HAS_MOVE;
-    }
-
-    let mut out = Vec::with_capacity(
-        2 + 4 + 4 + 4 + 2 + fen_bytes.len() + move_bytes.map_or(0, |mv| 1 + mv.len()),
-    );
-    out.push(VALUE_VERSION);
-    out.push(flags);
-    out.extend_from_slice(&depth.to_le_bytes());
-    if let Some(v) = eval {
-        out.extend_from_slice(&v.to_le_bytes());
-    }
-    if let Some(v) = mate {
-        out.extend_from_slice(&v.to_le_bytes());
-    }
-    out.extend_from_slice(&fen_len.to_le_bytes());
-    out.extend_from_slice(fen_bytes);
-    if let Some(mv) = move_bytes {
-        out.push(mv.len() as u8);
-        out.extend_from_slice(mv);
-    }
+    let mut out = [0u8; ENTRY_SIZE];
+    out[0..2].copy_from_slice(&score.to_le_bytes());
+    out[2] = depth_u8;
+    out[3..5].copy_from_slice(&move_meta.to_le_bytes());
+    out[5..].copy_from_slice(&board34);
     Ok(out)
+}
+
+fn clamp_i16(v: i32) -> i16 {
+    if v > i16::MAX as i32 {
+        i16::MAX
+    } else if v < i16::MIN as i32 {
+        i16::MIN
+    } else {
+        v as i16
+    }
+}
+
+fn clamp_depth_u8(depth: i32) -> u8 {
+    depth.clamp(0, u8::MAX as i32) as u8
+}
+
+fn pack_move_meta(best_move: Option<&str>, kind_bit: u16) -> Result<u16> {
+    let (from, to, promo) = if let Some(mv) = best_move {
+        parse_uci_move(mv)?
+    } else {
+        (0u8, 0u8, 0u8)
+    };
+
+    let packed = u16::from(from)
+        | (u16::from(to) << 6)
+        | (u16::from(promo) << 12)
+        | (kind_bit << 15);
+    Ok(packed)
+}
+
+fn parse_uci_move(mv: &str) -> Result<(u8, u8, u8)> {
+    if mv == "0000" {
+        return Ok((0, 0, 0));
+    }
+
+    let bytes = mv.as_bytes();
+    if bytes.len() != 4 && bytes.len() != 5 {
+        bail!("move is not UCI length 4/5: {}", mv);
+    }
+
+    let from = parse_square(&mv[0..2]).with_context(|| format!("invalid UCI from-square: {}", mv))?;
+    let to = parse_square(&mv[2..4]).with_context(|| format!("invalid UCI to-square: {}", mv))?;
+    let promo = if bytes.len() == 5 {
+        parse_promo(bytes[4] as char)?
+    } else {
+        0
+    };
+    Ok((from, to, promo))
+}
+
+fn parse_square(square: &str) -> Result<u8> {
+    let bytes = square.as_bytes();
+    if bytes.len() != 2 {
+        bail!("square must have length 2, got {}", square);
+    }
+    let file = bytes[0];
+    let rank = bytes[1];
+    if !(b'a'..=b'h').contains(&file) {
+        bail!("square file must be a..h, got {}", square);
+    }
+    if !(b'1'..=b'8').contains(&rank) {
+        bail!("square rank must be 1..8, got {}", square);
+    }
+    let file_idx = file - b'a';
+    let rank_idx = rank - b'1';
+    Ok(rank_idx * 8 + file_idx)
+}
+
+fn parse_promo(c: char) -> Result<u8> {
+    match c.to_ascii_lowercase() {
+        'n' => Ok(1),
+        'b' => Ok(2),
+        'r' => Ok(3),
+        'q' => Ok(4),
+        other => bail!("unsupported promotion piece: {}", other),
+    }
+}
+
+fn fen_to_board34(fen: &str) -> Result<[u8; BOARD34_SIZE]> {
+    let mut out = [0u8; BOARD34_SIZE];
+    let parts: Vec<&str> = fen.split_whitespace().collect();
+    if parts.len() < 4 {
+        bail!("FEN must have at least 4 fields: {}", fen);
+    }
+
+    let mut squares = [0u8; 64];
+    let ranks: Vec<&str> = parts[0].split('/').collect();
+    if ranks.len() != 8 {
+        bail!("FEN board must contain 8 ranks: {}", fen);
+    }
+    for (rank_from_top, rank_text) in ranks.iter().enumerate() {
+        let board_rank = 7usize
+            .checked_sub(rank_from_top)
+            .context("invalid rank index while parsing FEN")?;
+        let mut file_idx = 0usize;
+        for ch in rank_text.chars() {
+            if let Some(empty) = ch.to_digit(10) {
+                let empty = usize::try_from(empty).context("digit in FEN rank overflowed usize")?;
+                if empty == 0 || empty > 8 {
+                    bail!("invalid empty-square count `{}` in FEN {}", ch, fen);
+                }
+                file_idx += empty;
+                if file_idx > 8 {
+                    bail!("FEN rank overflows 8 files: {}", fen);
+                }
+                continue;
+            }
+
+            if file_idx >= 8 {
+                bail!("FEN rank overflows 8 files: {}", fen);
+            }
+            let sq = board_rank * 8 + file_idx;
+            squares[sq] = piece_to_code(ch)?;
+            file_idx += 1;
+        }
+
+        if file_idx != 8 {
+            bail!("FEN rank does not fill 8 files: {}", fen);
+        }
+    }
+
+    for i in 0..32 {
+        out[i] = squares[2 * i] | (squares[2 * i + 1] << 4);
+    }
+
+    let mut state = 0u8;
+    match parts[1] {
+        "w" => {}
+        "b" => state |= 1 << 0,
+        side => bail!("invalid side-to-move `{}` in FEN {}", side, fen),
+    }
+
+    let castling = parts[2];
+    if castling != "-" {
+        for ch in castling.chars() {
+            match ch {
+                'K' => state |= 1 << 1,
+                'Q' => state |= 1 << 2,
+                'k' => state |= 1 << 3,
+                'q' => state |= 1 << 4,
+                other => bail!("invalid castling flag `{}` in FEN {}", other, fen),
+            }
+        }
+    }
+    out[32] = state;
+
+    out[33] = if parts[3] == "-" {
+        u8::MAX
+    } else {
+        parse_square(parts[3]).with_context(|| format!("invalid en-passant square in FEN {}", fen))?
+    };
+
+    Ok(out)
+}
+
+fn piece_to_code(ch: char) -> Result<u8> {
+    match ch {
+        'P' => Ok(1),
+        'N' => Ok(2),
+        'B' => Ok(3),
+        'R' => Ok(4),
+        'Q' => Ok(5),
+        'K' => Ok(6),
+        'p' => Ok(7),
+        'n' => Ok(8),
+        'b' => Ok(9),
+        'r' => Ok(10),
+        'q' => Ok(11),
+        'k' => Ok(12),
+        _ => bail!("invalid FEN piece code `{}`", ch),
+    }
 }
 
 fn get_u64_value(array: &dyn Array, idx: usize) -> Result<u64> {
@@ -619,8 +842,10 @@ fn bulk_load_db_options() -> Options {
     let mut opts = Options::default();
     opts.create_if_missing(true);
     opts.prepare_for_bulk_load();
-    opts.set_compression_type(DBCompressionType::None);
-    opts.set_bottommost_compression_type(DBCompressionType::None);
+    opts.set_compression_type(DBCompressionType::Zstd);
+    opts.set_compression_options(0, 3, 0, 0);
+    opts.set_bottommost_compression_type(DBCompressionType::Zstd);
+    opts.set_bottommost_compression_options(0, 6, 0, 0, true);
 
     let parallelism = std::thread::available_parallelism()
         .map(|x| i32::try_from(x.get()).unwrap_or(1))

@@ -147,6 +147,42 @@ Run with explicit arguments:
 cargo run --release --bin parquet_simplified_to_sqlite -- --input-dir lichess_eval_parquet_zobr_simplified --output-dir /lichess_eval_sqlite --output-file lichess_eval.sqlite --batch-rows 50000 --cache-size-mb 512 --page-size 32768 --overwrite
 ```
 
+## Diagnose problematic FEN positions
+
+This executable extracts FENs from raw text (including `zobr64: ...` collision dumps), parses them with `shakmaty`, and prints detected issues per position.
+
+If `zobr64:` headers are present, output is grouped by `zobr64` and each group prints all its FEN diagnostics.
+
+Detected problem types include:
+- invalid FEN syntax
+- impossible side to move for standard starting board
+- invalid castling rights
+- invalid en-passant square
+- impossible check state
+- too much material
+- castling rights exist but required king/rook setup is impossible
+- en-passant square exists but no legal en-passant capture is possible
+
+Run with inline text:
+
+```bash
+cargo run --release --bin diagnose_fen_problems -- --text "zobr64: ... rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -"
+```
+
+Run from file:
+
+```bash
+cargo run --release --bin diagnose_fen_problems -- --input collisions.txt
+```
+
+Run from stdin:
+
+```bash
+cat collisions.txt | cargo run --release --bin diagnose_fen_problems --
+```
+
+All detected positions are printed. Valid positions are marked with `OK`.
+
 ## Convert eval jsonl.zst to RocksDB
 
 This executable reads `*.jsonl.zst` from `/lichess_db_eval`, computes `zobr64` from `fen`, and writes a RocksDB to `/lichess_eval_rocksdb`.
