@@ -10,8 +10,8 @@ use std::sync::{
 use anyhow::{Context, Result, bail};
 use arrow_array::builder::{Int32Builder, StringBuilder, UInt64Builder};
 use arrow_array::{
-    Array, ArrayRef, Int32Array, Int64Array, ListArray, RecordBatch, StringArray, StructArray,
-    UInt64Array,
+    Array, ArrayRef, Int32Array, Int64Array, LargeStringArray, ListArray, RecordBatch,
+    StringArray, StringViewArray, StructArray, UInt64Array,
 };
 use arrow_schema::{DataType, Field, Schema};
 use clap::Parser;
@@ -318,11 +318,7 @@ fn process_batch(
         .as_any()
         .downcast_ref::<UInt64Array>()
         .context("`zobr64` column must be UInt64")?;
-    let fen_arr = batch
-        .column(fen_idx)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .context("`fen` column must be Utf8")?;
+    let fen_col = batch.column(fen_idx);
     let evals_arr = batch
         .column(evals_idx)
         .as_any()
@@ -332,7 +328,8 @@ fn process_batch(
     for row in 0..batch.num_rows() {
         counters.input_rows += 1;
         let zobr64 = zobr_arr.value(row);
-        let fen = fen_arr.value(row);
+        let fen = fen_str_from_array(fen_col.as_ref(), row)
+            .context("`fen` column must be Utf8, LargeUtf8, or Utf8View")?;
 
         if current_zobr64.is_none() {
             *current_zobr64 = Some(zobr64);
@@ -351,13 +348,14 @@ fn process_batch(
             continue;
         };
 
+        let fen_without_castling_key = fen_without_castling_key(&fen);
         let candidate = CandidateRow {
             zobr64,
             eval,
             mate,
             depth,
-            fen: fen.to_string(),
-            fen_without_castling_key: fen_without_castling_key(fen),
+            fen,
+            fen_without_castling_key,
         };
         upsert_best_depth(current_group, candidate);
     }
@@ -442,6 +440,36 @@ fn first_pv_eval(
     let eval = get_i32_value(cp_arr.as_ref(), first_idx).context("invalid `cp` value")?;
     let mate = get_i32_value(mate_arr.as_ref(), first_idx).context("invalid `mate` value")?;
     Ok(Some((eval, mate)))
+}
+
+fn fen_str_from_array(array: &dyn Array, row: usize) -> Result<String> {
+    match array.data_type() {
+        DataType::Utf8 => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .context("fen: expected StringArray")?;
+            Ok(arr.value(row).to_string())
+        }
+        DataType::LargeUtf8 => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<LargeStringArray>()
+                .context("fen: expected LargeStringArray")?;
+            Ok(arr.value(row).to_string())
+        }
+        DataType::Utf8View => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<StringViewArray>()
+                .context("fen: expected StringViewArray")?;
+            Ok(arr.value(row).to_string())
+        }
+        other => bail!(
+            "fen column must be Utf8, LargeUtf8, or Utf8View, got {:?}",
+            other
+        ),
+    }
 }
 
 fn get_i32_value(array: &dyn Array, idx: usize) -> Result<Option<i32>> {
