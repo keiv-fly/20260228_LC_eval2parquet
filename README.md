@@ -116,6 +116,37 @@ Run with explicit arguments:
 cargo run --release --bin simplify_zobr_parquet -- --input-dir lichess_eval_parquet_zobr_sorted --output-dir /lichess_eval_parquet_zobr_simplified --target-file-mb 100 --batch-rows 50000 --parquet-zstd-level 3 --overwrite
 ```
 
+## Load simplified parquet into SQLite
+
+This executable reads parquet files from `lichess_eval_parquet_zobr_simplified` and writes a single SQLite database file in `/lichess_eval_sqlite`.
+
+- output file: `/lichess_eval_sqlite/lichess_eval.sqlite`
+- output table: `eval_by_zobr64`
+- schema columns: `zobr64`, `eval`, `mate`, `depth`, `fen`, `first_move`
+- row progress bar includes elapsed time + ETA
+- one bulk transaction is used for the whole load
+- duplicate `zobr64` rows are collapsed during load (last row for a key is kept)
+
+Run with defaults:
+
+```bash
+cargo run --release --bin parquet_simplified_to_sqlite --
+```
+
+Defaults:
+- input dir: `lichess_eval_parquet_zobr_simplified`
+- output dir: `/lichess_eval_sqlite`
+- output file: `lichess_eval.sqlite`
+- batch rows: `50000`
+- sqlite cache size: `512 MB`
+- sqlite page size: `32768`
+
+Run with explicit arguments:
+
+```bash
+cargo run --release --bin parquet_simplified_to_sqlite -- --input-dir lichess_eval_parquet_zobr_simplified --output-dir /lichess_eval_sqlite --output-file lichess_eval.sqlite --batch-rows 50000 --cache-size-mb 512 --page-size 32768 --overwrite
+```
+
 ## Convert eval jsonl.zst to RocksDB
 
 This executable reads `*.jsonl.zst` from `/lichess_db_eval`, computes `zobr64` from `fen`, and writes a RocksDB to `/lichess_eval_rocksdb`.
