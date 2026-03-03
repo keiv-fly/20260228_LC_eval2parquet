@@ -18,7 +18,7 @@ use zstd::stream::read::Decoder;
 
 const DEFAULT_INPUT_DIR: &str = "/lichess_db_eval";
 const DEFAULT_OUTPUT_DIR: &str = "/lichess_eval_rocksdb";
-const DEFAULT_PROGRESS_EVERY: u64 = 1_000_000;
+const DEFAULT_PROGRESS_EVERY: u64 = 10_000_000;
 
 #[derive(Parser, Debug)]
 #[command(
