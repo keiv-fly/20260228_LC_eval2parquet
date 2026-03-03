@@ -87,6 +87,35 @@ Run with explicit arguments:
 cargo run --release --bin sort_parquet -- --input-dir lichess_eval_parquet_zobr --output-dir lichess_eval_parquet_zobr_sorted --sort-column zobr64 --target-file-mb 100 --batch-rows 5000 --memory-limit-mb 2048 --parquet-zstd-level 3 --overwrite
 ```
 
+## Simplify zobr-sorted parquet
+
+This executable reads parquet files from `lichess_eval_parquet_zobr_sorted` (already sorted by `zobr64`) and writes simplified parquet parts to `/lichess_eval_parquet_zobr_simplified` with columns:
+
+- `zobr64`
+- `eval`
+- `mate`
+- `depth`
+- `fen`
+
+Rules applied:
+- per input row, select the eval entry with the highest `depth` (using its first PV for `eval`/`mate`)
+- per `zobr64`, if positions differ **only** by castling rights, keep only the deepest one
+- per `zobr64`, if positions differ by anything else (board, side to move, or en-passant), keep each distinct position
+
+Output files rotate at approximately `100 MB` each (`--target-file-mb`).
+
+Run with defaults:
+
+```bash
+cargo run --release --bin simplify_zobr_parquet --
+```
+
+Run with explicit arguments:
+
+```bash
+cargo run --release --bin simplify_zobr_parquet -- --input-dir lichess_eval_parquet_zobr_sorted --output-dir /lichess_eval_parquet_zobr_simplified --target-file-mb 100 --batch-rows 50000 --parquet-zstd-level 3 --overwrite
+```
+
 ## Convert eval jsonl.zst to RocksDB
 
 This executable reads `*.jsonl.zst` from `/lichess_db_eval`, computes `zobr64` from `fen`, and writes a RocksDB to `/lichess_eval_rocksdb`.
