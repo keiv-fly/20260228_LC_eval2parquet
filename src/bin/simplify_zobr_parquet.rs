@@ -31,7 +31,7 @@ const DEFAULT_ZSTD_LEVEL: i32 = 3;
 #[command(
     author,
     version,
-    about = "Simplify sorted zobr parquet into columns zobr64, eval, mate, depth, fen."
+    about = "Simplify sorted zobr parquet into columns zobr64, eval, mate, depth, fen, first_move."
 )]
 struct Args {
     /// Input parquet directory (must be globally sorted by zobr64)
@@ -66,6 +66,7 @@ struct CandidateRow {
     mate: Option<i32>,
     depth: i32,
     fen: String,
+    first_move: Option<String>,
     fen_without_castling_key: String,
 }
 
@@ -341,7 +342,7 @@ fn process_batch(
             *current_zobr64 = Some(zobr64);
         }
 
-        let Some((eval, mate, depth)) = extract_best_eval_for_row(evals_arr, row)
+        let Some((eval, mate, depth, first_move)) = extract_best_eval_for_row(evals_arr, row)
             .with_context(|| format!("failed to extract eval from row {}", row))?
         else {
             counters.skipped_rows_without_eval += 1;
@@ -355,6 +356,7 @@ fn process_batch(
             mate,
             depth,
             fen,
+            first_move,
             fen_without_castling_key,
         };
         upsert_best_depth(current_group, candidate);
@@ -366,7 +368,7 @@ fn process_batch(
 fn extract_best_eval_for_row(
     evals_arr: &ListArray,
     row_idx: usize,
-) -> Result<Option<(Option<i32>, Option<i32>, i32)>> {
+) -> Result<Option<(Option<i32>, Option<i32>, i32, Option<String>)>> {
     if evals_arr.is_null(row_idx) {
         return Ok(None);
     }
@@ -390,7 +392,7 @@ fn extract_best_eval_for_row(
         .downcast_ref::<ListArray>()
         .context("`pvs` field must be List")?;
 
-    let mut best: Option<(Option<i32>, Option<i32>, i32)> = None;
+    let mut best: Option<(Option<i32>, Option<i32>, i32, Option<String>)> = None;
     for eval_idx in 0..evals_struct.len() {
         let Some(depth) = get_i32_value(depth_arr.as_ref(), eval_idx)
             .with_context(|| format!("invalid depth at eval index {}", eval_idx))?
@@ -398,14 +400,17 @@ fn extract_best_eval_for_row(
             continue;
         };
 
-        let Some((eval, mate)) = first_pv_eval(pvs_arr, eval_idx)
+        let Some((eval, mate, first_move)) = first_pv_eval(pvs_arr, eval_idx)
             .with_context(|| format!("invalid PV at eval index {}", eval_idx))?
         else {
             continue;
         };
 
-        if best.is_none_or(|(_, _, best_depth)| depth > best_depth) {
-            best = Some((eval, mate, depth));
+        if best
+            .as_ref()
+            .is_none_or(|(_, _, best_depth, _)| depth > *best_depth)
+        {
+            best = Some((eval, mate, depth, first_move));
         }
     }
 
@@ -415,7 +420,7 @@ fn extract_best_eval_for_row(
 fn first_pv_eval(
     pvs_arr: &ListArray,
     eval_idx: usize,
-) -> Result<Option<(Option<i32>, Option<i32>)>> {
+) -> Result<Option<(Option<i32>, Option<i32>, Option<String>)>> {
     if pvs_arr.is_null(eval_idx) {
         return Ok(None);
     }
@@ -435,11 +440,16 @@ fn first_pv_eval(
     let mate_arr = pvs_struct
         .column_by_name("mate")
         .context("pv struct is missing `mate` field")?;
+    let line_arr = pvs_struct
+        .column_by_name("line")
+        .context("pv struct is missing `line` field")?;
     let first_idx = 0usize;
 
     let eval = get_i32_value(cp_arr.as_ref(), first_idx).context("invalid `cp` value")?;
     let mate = get_i32_value(mate_arr.as_ref(), first_idx).context("invalid `mate` value")?;
-    Ok(Some((eval, mate)))
+    let line = get_string_value(line_arr.as_ref(), first_idx).context("invalid `line` value")?;
+    let first_move = line.and_then(|line| first_move_from_line(&line));
+    Ok(Some((eval, mate, first_move)))
 }
 
 fn fen_str_from_array(array: &dyn Array, row: usize) -> Result<String> {
@@ -502,6 +512,52 @@ fn get_i32_value(array: &dyn Array, idx: usize) -> Result<Option<i32>> {
     }
 }
 
+fn get_string_value(array: &dyn Array, idx: usize) -> Result<Option<String>> {
+    match array.data_type() {
+        DataType::Utf8 => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .context("expected StringArray")?;
+            if arr.is_null(idx) {
+                Ok(None)
+            } else {
+                Ok(Some(arr.value(idx).to_string()))
+            }
+        }
+        DataType::LargeUtf8 => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<LargeStringArray>()
+                .context("expected LargeStringArray")?;
+            if arr.is_null(idx) {
+                Ok(None)
+            } else {
+                Ok(Some(arr.value(idx).to_string()))
+            }
+        }
+        DataType::Utf8View => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<StringViewArray>()
+                .context("expected StringViewArray")?;
+            if arr.is_null(idx) {
+                Ok(None)
+            } else {
+                Ok(Some(arr.value(idx).to_string()))
+            }
+        }
+        other => bail!(
+            "expected Utf8, LargeUtf8, or Utf8View array, got {:?}",
+            other
+        ),
+    }
+}
+
+fn first_move_from_line(line: &str) -> Option<String> {
+    line.split_whitespace().next().map(|mv| mv.to_string())
+}
+
 fn upsert_best_depth(group: &mut HashMap<String, CandidateRow>, candidate: CandidateRow) {
     let key = candidate.fen_without_castling_key.clone();
     match group.get_mut(&key) {
@@ -550,6 +606,7 @@ fn output_schema() -> Schema {
         Field::new("mate", DataType::Int32, true),
         Field::new("depth", DataType::Int32, false),
         Field::new("fen", DataType::Utf8, false),
+        Field::new("first_move", DataType::Utf8, true),
     ])
 }
 
@@ -559,7 +616,12 @@ fn build_output_batch(schema: Arc<Schema>, rows: &[CandidateRow]) -> Result<Reco
     let mut mate_builder = Int32Builder::with_capacity(rows.len());
     let mut depth_builder = Int32Builder::with_capacity(rows.len());
     let total_fen_bytes: usize = rows.iter().map(|r| r.fen.len()).sum();
+    let total_first_move_bytes: usize = rows
+        .iter()
+        .map(|r| r.first_move.as_deref().map_or(0, str::len))
+        .sum();
     let mut fen_builder = StringBuilder::with_capacity(rows.len(), total_fen_bytes);
+    let mut first_move_builder = StringBuilder::with_capacity(rows.len(), total_first_move_bytes);
 
     for row in rows {
         zobr_builder.append_value(row.zobr64);
@@ -573,6 +635,10 @@ fn build_output_batch(schema: Arc<Schema>, rows: &[CandidateRow]) -> Result<Reco
         }
         depth_builder.append_value(row.depth);
         fen_builder.append_value(&row.fen);
+        match row.first_move.as_deref() {
+            Some(v) => first_move_builder.append_value(v),
+            None => first_move_builder.append_null(),
+        }
     }
 
     let columns: Vec<ArrayRef> = vec![
@@ -581,6 +647,7 @@ fn build_output_batch(schema: Arc<Schema>, rows: &[CandidateRow]) -> Result<Reco
         Arc::new(mate_builder.finish()),
         Arc::new(depth_builder.finish()),
         Arc::new(fen_builder.finish()),
+        Arc::new(first_move_builder.finish()),
     ];
     RecordBatch::try_new(schema, columns).context("failed to build output batch")
 }
