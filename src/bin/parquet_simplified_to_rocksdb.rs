@@ -57,7 +57,6 @@ struct StoredEval {
 struct Counters {
     input_rows: u64,
     updated_keys: u64,
-    kept_existing_keys: u64,
 }
 
 fn main() -> Result<()> {
@@ -104,8 +103,8 @@ fn main() -> Result<()> {
     progress.finish_with_message("Conversion complete");
 
     println!(
-        "Done. input_rows={} updated_keys={} kept_existing_keys={}",
-        counters.input_rows, counters.updated_keys, counters.kept_existing_keys
+        "Done. input_rows={} updated_keys={}",
+        counters.input_rows, counters.updated_keys
     );
 
     Ok(())
@@ -131,8 +130,8 @@ fn process_input_file(
         process_batch(db, &batch, counters)?;
         if counters.input_rows % progress_every_rows == 0 {
             println!(
-                "rows={} updated={} kept_existing={}",
-                counters.input_rows, counters.updated_keys, counters.kept_existing_keys
+                "rows={} updated={}",
+                counters.input_rows, counters.updated_keys
             );
         }
     }
@@ -197,33 +196,18 @@ fn process_batch(db: &DB, batch: &RecordBatch, counters: &mut Counters) -> Resul
             best_move,
         };
 
-        if upsert_best_by_depth(db, zobr64, &candidate)? {
-            counters.updated_keys += 1;
-        } else {
-            counters.kept_existing_keys += 1;
-        }
+        write_key_value(db, zobr64, &candidate)?;
+        counters.updated_keys += 1;
     }
 
     Ok(())
 }
 
-fn upsert_best_by_depth(db: &DB, zobr64: u64, candidate: &StoredEval) -> Result<bool> {
+fn write_key_value(db: &DB, zobr64: u64, candidate: &StoredEval) -> Result<()> {
     let key = zobr64.to_be_bytes();
-
-    if let Some(existing_bytes) = db
-        .get(key)
-        .context("rocksdb get failed while checking existing key")?
-    {
-        let existing: StoredEval = serde_json::from_slice(&existing_bytes)
-            .context("failed to decode existing RocksDB value JSON")?;
-        if existing.depth >= candidate.depth {
-            return Ok(false);
-        }
-    }
-
     let value = serde_json::to_vec(candidate).context("failed to encode RocksDB value JSON")?;
     db.put(key, value).context("rocksdb put failed")?;
-    Ok(true)
+    Ok(())
 }
 
 fn get_u64_value(array: &dyn Array, idx: usize) -> Result<u64> {
