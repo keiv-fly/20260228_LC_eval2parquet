@@ -177,7 +177,10 @@ impl<'a> SstIngestState<'a> {
 
         if active.path.exists() {
             fs::remove_file(&active.path).with_context(|| {
-                format!("failed to remove temporary SST file {}", active.path.display())
+                format!(
+                    "failed to remove temporary SST file {}",
+                    active.path.display()
+                )
             })?;
         }
         Ok(())
@@ -336,8 +339,10 @@ fn load_with_write_batch(
         written_keys += 1;
 
         if rows_in_batch >= write_batch_rows {
-            let full_batch =
-                std::mem::replace(&mut batch, WriteBatch::with_capacity_bytes(batch_capacity_bytes));
+            let full_batch = std::mem::replace(
+                &mut batch,
+                WriteBatch::with_capacity_bytes(batch_capacity_bytes),
+            );
             db.write_opt(full_batch, &write_opts)
                 .context("failed to write RocksDB WriteBatch")?;
             rows_in_batch = 0;

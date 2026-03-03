@@ -10,8 +10,8 @@ use std::sync::{
 use anyhow::{Context, Result, bail};
 use arrow_array::builder::{Int32Builder, StringBuilder, UInt64Builder};
 use arrow_array::{
-    Array, ArrayRef, Int32Array, Int64Array, LargeStringArray, ListArray, RecordBatch,
-    StringArray, StringViewArray, StructArray, UInt64Array,
+    Array, ArrayRef, Int32Array, Int64Array, LargeStringArray, ListArray, RecordBatch, StringArray,
+    StringViewArray, StructArray, UInt64Array,
 };
 use arrow_schema::{DataType, Field, Schema};
 use clap::Parser;
