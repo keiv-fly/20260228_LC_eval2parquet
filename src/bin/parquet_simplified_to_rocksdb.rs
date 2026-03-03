@@ -7,13 +7,13 @@ use arrow_schema::DataType;
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::file::reader::{FileReader, SerializedFileReader};
 use rocksdb::{DB, Options};
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_INPUT_DIR: &str = "lichess_eval_parquet_zobr_simplified";
 const DEFAULT_OUTPUT_DIR: &str = "/lichess_eval_rocksdb";
 const DEFAULT_BATCH_ROWS: usize = 50_000;
-const DEFAULT_PROGRESS_EVERY_ROWS: u64 = 1_000_000;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -33,10 +33,6 @@ struct Args {
     /// Input reader batch size
     #[arg(long, default_value_t = DEFAULT_BATCH_ROWS)]
     batch_rows: usize,
-
-    /// Print counters every N rows
-    #[arg(long, default_value_t = DEFAULT_PROGRESS_EVERY_ROWS)]
-    progress_every_rows: u64,
 
     /// Remove output directory before writing
     #[arg(long)]
@@ -64,9 +60,6 @@ fn main() -> Result<()> {
     if args.batch_rows == 0 {
         bail!("--batch-rows must be > 0");
     }
-    if args.progress_every_rows == 0 {
-        bail!("--progress-every-rows must be > 0");
-    }
 
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let input_dir = resolve_user_path(&cwd, &args.input_dir);
@@ -76,27 +69,21 @@ fn main() -> Result<()> {
     }
 
     let input_files = list_parquet_files(&input_dir)?;
+    let total_rows = total_rows_in_parquet_files(&input_files)?;
     prepare_output_dir(&output_dir, args.overwrite)?;
     let db = open_rocksdb(&output_dir)?;
 
     println!("Input dir: {}", input_dir.display());
     println!("Input parquet files: {}", input_files.len());
+    println!("Total input rows: {}", total_rows);
     println!("Output DB dir: {}", output_dir.display());
     println!("Batch rows: {}", args.batch_rows);
-    println!("Progress interval: {} rows", args.progress_every_rows);
 
-    let progress = build_progress_bar(input_files.len() as u64);
+    let progress = build_progress_bar(total_rows);
     let mut counters = Counters::default();
 
     for input_file in &input_files {
-        process_input_file(
-            &db,
-            input_file,
-            args.batch_rows,
-            args.progress_every_rows,
-            &mut counters,
-        )?;
-        progress.inc(1);
+        process_input_file(&db, input_file, args.batch_rows, &progress, &mut counters)?;
     }
 
     db.flush().context("failed to flush RocksDB")?;
@@ -114,7 +101,7 @@ fn process_input_file(
     db: &DB,
     input_path: &Path,
     batch_rows: usize,
-    progress_every_rows: u64,
+    progress: &ProgressBar,
     counters: &mut Counters,
 ) -> Result<()> {
     let source = File::open(input_path)
@@ -127,13 +114,9 @@ fn process_input_file(
 
     for batch in &mut reader {
         let batch = batch.context("failed reading input record batch")?;
+        let rows_in_batch = batch.num_rows() as u64;
         process_batch(db, &batch, counters)?;
-        if counters.input_rows % progress_every_rows == 0 {
-            println!(
-                "rows={} updated={}",
-                counters.input_rows, counters.updated_keys
-            );
-        }
+        progress.inc(rows_in_batch);
     }
 
     Ok(())
@@ -390,6 +373,22 @@ fn list_parquet_files(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+fn total_rows_in_parquet_files(files: &[PathBuf]) -> Result<u64> {
+    let mut total_rows: u64 = 0;
+    for path in files {
+        let source = File::open(path)
+            .with_context(|| format!("failed to open input file {}", path.display()))?;
+        let reader = SerializedFileReader::new(source)
+            .with_context(|| format!("failed to read parquet metadata {}", path.display()))?;
+        let file_rows = u64::try_from(reader.metadata().file_metadata().num_rows())
+            .context("parquet num_rows did not fit into u64")?;
+        total_rows = total_rows
+            .checked_add(file_rows)
+            .context("total input rows overflowed u64")?;
+    }
+    Ok(total_rows)
+}
+
 fn open_rocksdb(output_dir: &Path) -> Result<DB> {
     let mut opts = Options::default();
     opts.create_if_missing(true);
@@ -417,11 +416,11 @@ fn resolve_user_path(cwd: &Path, user_path: &str) -> PathBuf {
     cwd.join(path)
 }
 
-fn build_progress_bar(total_files: u64) -> ProgressBar {
-    let progress = ProgressBar::new(total_files);
+fn build_progress_bar(total_rows: u64) -> ProgressBar {
+    let progress = ProgressBar::new(total_rows);
     progress.set_style(
         ProgressStyle::with_template(
-            "{wide_bar} {pos}/{len} files | elapsed: {elapsed_precise} | eta: {eta_precise}",
+            "{wide_bar} {percent:>3}% {pos}/{len} rows | elapsed: {elapsed_precise} | eta: {eta_precise}",
         )
         .expect("invalid progress bar template")
         .progress_chars("=> "),
