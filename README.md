@@ -147,6 +147,63 @@ Run with explicit arguments:
 cargo run --release --bin parquet_simplified_to_sqlite -- --input-dir lichess_eval_parquet_zobr_simplified --output-dir /lichess_eval_sqlite --output-file lichess_eval.sqlite --batch-rows 50000 --cache-size-mb 512 --page-size 32768 --overwrite
 ```
 
+## Load simplified parquet into RocksDB
+
+This executable reads parquet files from `lichess_eval_parquet_zobr_simplified` and writes a RocksDB in `/lichess_eval_rocksdb` using the schema in `design/20260303_rocksdb_schema.md`.
+
+- key: `zobr64` (8 bytes, big-endian `u64`)
+- value: `u8 count` + `count` fixed-size entries (39 bytes each)
+- each entry: `i16 score` (LE), `u8 depth`, `u16 move_meta` (LE), `u8[34] board34`
+- if multiple rows share the same `zobr64`, all entries are stored for that key
+- score/depth are clamped to schema bounds during encoding
+- RocksDB uses zstd compression (normal level 3, bottommost level 6) and runs full compaction at the end
+
+Run with defaults:
+
+```bash
+cargo run --release --bin parquet_simplified_to_rocksdb --
+```
+
+Defaults:
+- input dir: `lichess_eval_parquet_zobr_simplified`
+- output dir: `/lichess_eval_rocksdb`
+- batch rows: `50000`
+- write path: `sst` (fastest when input is sorted by `zobr64`)
+- sst rows per file: `2000000`
+
+Run with explicit arguments:
+
+```bash
+cargo run --release --bin parquet_simplified_to_rocksdb -- --input-dir lichess_eval_parquet_zobr_simplified --output-dir /lichess_eval_rocksdb --batch-rows 50000 --write-path sst --sst-rows-per-file 2000000 --overwrite
+```
+
+Alternative WriteBatch mode:
+
+```bash
+cargo run --release --bin parquet_simplified_to_rocksdb -- --input-dir lichess_eval_parquet_zobr_simplified --output-dir /lichess_eval_rocksdb --batch-rows 50000 --write-path batch --write-batch-rows 50000 --overwrite
+```
+
+## Check bad castling FENs in simplified parquet
+
+This executable scans a sample of rows from `lichess_eval_parquet_zobr_simplified` and prints FENs that fail due to invalid castling flags.
+
+Run with defaults (first 1% of rows):
+
+```bash
+cargo run --release --bin check_bad_castling_fens --
+```
+
+Defaults:
+- input dir: `lichess_eval_parquet_zobr_simplified`
+- batch rows: `50000`
+- sample percent: `1.0`
+
+Run with explicit arguments and save failing FENs:
+
+```bash
+cargo run --release --bin check_bad_castling_fens -- --input-dir lichess_eval_parquet_zobr_simplified --batch-rows 50000 --sample-percent 1 > bad_castling_fens.txt
+```
+
 ## Diagnose problematic FEN positions
 
 This executable extracts FENs from raw text (including `zobr64: ...` collision dumps), parses them with `shakmaty`, and prints detected issues per position.

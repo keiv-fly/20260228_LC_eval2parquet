@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
@@ -71,8 +72,62 @@ struct Args {
 
 struct LoadStats {
     input_rows: u64,
+    skipped_rows: u64,
+    invalid_castling_by_letter: BTreeMap<char, u64>,
     written_keys: u64,
     ingested_sst_files: u64,
+}
+
+struct StreamStats {
+    input_rows: u64,
+    skipped_rows: u64,
+    invalid_castling_by_letter: BTreeMap<char, u64>,
+}
+
+struct CastlingSkipProgress {
+    total_rows: u64,
+    next_report_percent: u64,
+    invalid_castling_by_letter: BTreeMap<char, u64>,
+}
+
+impl CastlingSkipProgress {
+    fn new(total_rows: u64) -> Self {
+        Self {
+            total_rows,
+            next_report_percent: 10,
+            invalid_castling_by_letter: BTreeMap::new(),
+        }
+    }
+
+    fn record_error(&mut self, err: &anyhow::Error) {
+        if let Some(letter) = invalid_castling_letter_from_error(err) {
+            *self.invalid_castling_by_letter.entry(letter).or_insert(0) += 1;
+        }
+    }
+
+    fn maybe_report(&mut self, progress: &ProgressBar, processed_rows: u64) {
+        if self.total_rows == 0 {
+            return;
+        }
+
+        while self.next_report_percent <= 100
+            && processed_rows.saturating_mul(100)
+                >= self.total_rows.saturating_mul(self.next_report_percent)
+        {
+            progress.println(format!(
+                "castling skip distribution at {}% (processed {}/{} rows):",
+                self.next_report_percent, processed_rows, self.total_rows
+            ));
+            for line in castling_distribution_table_lines(&self.invalid_castling_by_letter) {
+                progress.println(line);
+            }
+            self.next_report_percent += 10;
+        }
+    }
+
+    fn into_distribution(self) -> BTreeMap<char, u64> {
+        self.invalid_castling_by_letter
+    }
 }
 
 struct PendingKey {
@@ -251,9 +306,13 @@ fn main() -> Result<()> {
     progress.finish_with_message("Conversion complete");
 
     println!(
-        "Done. input_rows={} written_keys={} ingested_sst_files={}",
-        stats.input_rows, stats.written_keys, stats.ingested_sst_files
+        "Done. input_rows={} skipped_rows={} written_keys={} ingested_sst_files={}",
+        stats.input_rows, stats.skipped_rows, stats.written_keys, stats.ingested_sst_files
     );
+    println!("Final castling skip distribution:");
+    for line in castling_distribution_table_lines(&stats.invalid_castling_by_letter) {
+        println!("{}", line);
+    }
 
     Ok(())
 }
@@ -279,7 +338,7 @@ fn load_with_sst_ingest(
     let mut pending: Option<PendingKey> = None;
     let mut last_input_key: Option<u64> = None;
 
-    let input_rows = stream_rows(input_files, batch_rows, progress, |zobr64, entry| {
+    let stream_stats = stream_rows(input_files, batch_rows, progress, |zobr64, entry| {
         if let Some(last) = last_input_key
             && zobr64 < last
         {
@@ -325,7 +384,9 @@ fn load_with_sst_ingest(
     }
 
     Ok(LoadStats {
-        input_rows,
+        input_rows: stream_stats.input_rows,
+        skipped_rows: stream_stats.skipped_rows,
+        invalid_castling_by_letter: stream_stats.invalid_castling_by_letter,
         written_keys: sst_state.written_keys,
         ingested_sst_files: sst_state.ingested_sst_files,
     })
@@ -348,7 +409,7 @@ fn load_with_write_batch(
     let mut pending: Option<PendingKey> = None;
     let mut last_input_key: Option<u64> = None;
 
-    let input_rows = stream_rows(input_files, batch_rows, progress, |zobr64, entry| {
+    let stream_stats = stream_rows(input_files, batch_rows, progress, |zobr64, entry| {
         if let Some(last) = last_input_key
             && zobr64 < last
         {
@@ -409,7 +470,9 @@ fn load_with_write_batch(
     }
 
     Ok(LoadStats {
-        input_rows,
+        input_rows: stream_stats.input_rows,
+        skipped_rows: stream_stats.skipped_rows,
+        invalid_castling_by_letter: stream_stats.invalid_castling_by_letter,
         written_keys,
         ingested_sst_files: 0,
     })
@@ -420,11 +483,13 @@ fn stream_rows<F>(
     batch_rows: usize,
     progress: &ProgressBar,
     mut on_row: F,
-) -> Result<u64>
+) -> Result<StreamStats>
 where
     F: FnMut(u64, [u8; ENTRY_SIZE]) -> Result<()>,
 {
     let mut input_rows = 0u64;
+    let mut skipped_rows = 0u64;
+    let mut castling_progress = CastlingSkipProgress::new(progress.length().unwrap_or(0));
 
     for input_path in input_files {
         let source = File::open(input_path)
@@ -437,15 +502,33 @@ where
 
         for batch in &mut reader {
             let batch = batch.context("failed reading input record batch")?;
-            process_batch(&batch, &mut input_rows, &mut on_row)?;
+            process_batch(
+                &batch,
+                &mut input_rows,
+                &mut skipped_rows,
+                &mut castling_progress,
+                progress,
+                &mut on_row,
+            )?;
             progress.inc(batch.num_rows() as u64);
         }
     }
 
-    Ok(input_rows)
+    Ok(StreamStats {
+        input_rows,
+        skipped_rows,
+        invalid_castling_by_letter: castling_progress.into_distribution(),
+    })
 }
 
-fn process_batch<F>(batch: &RecordBatch, input_rows: &mut u64, on_row: &mut F) -> Result<()>
+fn process_batch<F>(
+    batch: &RecordBatch,
+    input_rows: &mut u64,
+    skipped_rows: &mut u64,
+    castling_progress: &mut CastlingSkipProgress,
+    progress: &ProgressBar,
+    on_row: &mut F,
+) -> Result<()>
 where
     F: FnMut(u64, [u8; ENTRY_SIZE]) -> Result<()>,
 {
@@ -497,12 +580,53 @@ where
             None
         };
 
-        let encoded = encode_entry(eval, mate, depth, &fen, best_move.as_deref())
-            .with_context(|| format!("failed to encode row {}", row))?;
+        let encoded = match encode_entry(eval, mate, depth, &fen, best_move.as_deref()) {
+            Ok(encoded) => encoded,
+            Err(err) => {
+                *skipped_rows += 1;
+                castling_progress.record_error(&err);
+                castling_progress.maybe_report(progress, *input_rows);
+                continue;
+            }
+        };
         on_row(zobr64, encoded)?;
+        castling_progress.maybe_report(progress, *input_rows);
     }
 
     Ok(())
+}
+
+fn invalid_castling_letter_from_error(err: &anyhow::Error) -> Option<char> {
+    const PREFIX: &str = "invalid castling flag `";
+    for cause in err.chain() {
+        let msg = cause.to_string();
+        let Some(start) = msg.find(PREFIX) else {
+            continue;
+        };
+        let mut tail = msg[start + PREFIX.len()..].chars();
+        let letter = tail.next()?;
+        if tail.next() == Some('`') {
+            return Some(letter);
+        }
+    }
+    None
+}
+
+fn castling_distribution_table_lines(distribution: &BTreeMap<char, u64>) -> Vec<String> {
+    let mut lines = vec![
+        "invalid letters for castling | number of lines".to_string(),
+        "-----------------------------+----------------".to_string(),
+    ];
+
+    if distribution.is_empty() {
+        lines.push("- | 0".to_string());
+    } else {
+        for (letter, count) in distribution {
+            lines.push(format!("{} | {}", letter, count));
+        }
+    }
+
+    lines
 }
 
 fn encode_rocksdb_value(entries: &[[u8; ENTRY_SIZE]]) -> Result<Vec<u8>> {
